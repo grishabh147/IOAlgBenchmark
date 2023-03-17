@@ -1,0 +1,156 @@
+import numpy as np
+import numpy.random as npr
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+import os
+import sys
+import shutil
+
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from matplotlib import cm
+plt.style.use('bmh')
+from matplotlib import rc
+# rc('font',**{'family':'sans-serif','sans-serif':['Helvetica']})
+# rc('text', usetex=True)
+
+import cvxpy as cp
+from cvxpylayers.torch import CvxpyLayer
+
+def to_np(x):
+    return x.detach().numpy()
+
+def inConstraints(x, G, h):
+    return int(np.all(G.dot(x) <= h))
+
+def plotConstraints(G0, h0, G1=None, h1=None, xmin=0, xmax=1, ymin=0, ymax=1):
+    xx, yy = np.meshgrid(np.linspace(xmin, xmax, 600),
+                         np.linspace(ymin, ymax, 600))
+    xxFlat = xx.ravel()
+    yyFlat = yy.ravel()
+    gridX = np.vstack((xxFlat, yyFlat)).T
+
+    fig, ax = plt.subplots(1, 1, figsize=(5,5))
+    ax.axis([xmin, xmax, ymin, ymax])
+
+    zzFlat0 = []
+    zzFlat1 = []
+    _xmin = _xmax = _ymin = _ymax = 0.5
+    for i in range(len(gridX)):
+        xi = gridX[i]
+        t = inConstraints(xi, G0, h0)
+        zzFlat0.append(t)
+        if t:
+            _xmin = min(_xmin, xi[0])
+            _xmax = max(_xmax, xi[0])
+            _ymin = min(_ymin, xi[1])
+            _ymax = max(_ymax, xi[1])
+        if G1 is not None:
+            t = inConstraints(xi, G1, h1)
+            zzFlat1.append(t)
+
+    zz0 = np.array(zzFlat0).reshape(xx.shape)
+    cs = ax.contourf(xx, yy, zz0, cmap=cm.Blues, alpha=0.5)
+    cs.cmap.set_under('white')
+    cs.set_clim(0.5, 1.0)
+
+    if G1 is not None:
+        zz1 = np.array(zzFlat1).reshape(xx.shape)
+        cs = ax.contourf(xx, yy, zz1, cmap=cm.Reds, alpha=0.5)
+        cs.cmap.set_under('white')
+        cs.set_clim(0.5, 1.0)
+
+    scale = 0.1
+    _xmin, _ymin = [z-scale*z for z in [_xmin, _ymin]]
+    _xmax, _ymax = [z+scale*z for z in [_xmax, _ymax]]
+    ax.axis([_xmin, _xmax, _ymin, _ymax])
+    ax.axes.get_xaxis().set_visible(False)
+    ax.axes.get_yaxis().set_visible(False)
+
+    return fig, ax
+
+#%matplotlib inline
+#%config InlineBackend.figure_format = 'svg'
+
+# The Rectified Linear Unit (ReLU)
+n = 201
+x = torch.linspace(-5, 5, steps=n, requires_grad=True)
+y = F.relu(x)
+plt.plot(x.detach().numpy(), y.detach().numpy())
+plt.title('The Standard ReLU')
+plt.xlabel('$x$')
+plt.ylabel('$f(x)$')
+
+# Differentiate using PyTorch capabilities and plot
+y.sum().backward()      
+plt.plot(to_np(x), to_np(x.grad))
+plt.title('The Derivative of the Standard ReLU')
+plt.xlabel('$x$')
+plt.ylabel('$f\'(x)$') 
+
+# Using cvxpylayers we can easily implement this optimization problem as a PyTorch layer
+_x = cp.Parameter(n)
+_y = cp.Variable(n)
+obj = cp.Minimize(cp.sum_squares(_y-_x))
+cons = [_y >= 0]
+prob = cp.Problem(obj, cons)
+layer = CvxpyLayer(prob, parameters=[_x], variables=[_y])   # Create PyTorch interface
+
+# Plot the variation ReLU
+x = torch.linspace(-5, 5, steps=n, requires_grad=True)
+y, = layer(x)
+plt.plot(to_np(x), to_np(y))
+plt.title('The Variational ReLU')
+plt.xlabel('$x$')
+plt.ylabel('$f(x)$')
+plt.show()
+
+# Plot the derivative of the variational ReLU
+y.sum().backward()
+plt.plot(to_np(x), to_np(x.grad))
+plt.title('The Derivative of the Variational ReLU')
+plt.xlabel('$x$')
+plt.ylabel('$f\'(x)$')
+
+# Plot standard sigmoid
+n = 100
+x = torch.linspace(-5, 5, steps=n, requires_grad=True)
+y = torch.sigmoid(x)
+plt.plot(to_np(x), to_np(y))
+plt.title('The Standard Sigmoid')
+plt.xlabel('$x$')
+plt.ylabel('$f(x)$')
+
+# Plot derivative of standard sigmoid
+y.sum().backward()
+plt.plot(to_np(x), to_np(x.grad))
+plt.title('The Derivative of the Standard Sigmoid')
+plt.xlabel('$x$')
+plt.ylabel('$f(x)$')
+
+# Plot variational sigmoid
+_x = cp.Parameter(n)
+_y = cp.Variable(n)
+obj = cp.Minimize(-_x.T*_y - cp.sum(cp.entr(_y) + cp.entr(1.-_y)))
+prob = cp.Problem(obj)
+layer = CvxpyLayer(prob, parameters=[_x], variables=[_y])
+x = torch.linspace(-5, 5, steps=n, requires_grad=True)
+y, = layer(x)
+plt.plot(x.detach().numpy(), y.detach().numpy())
+plt.title('The Variational Sigmoid')
+plt.xlabel('$x$')
+plt.ylabel('$f(x)$')
+
+# Plot derivative of variational sigmoid
+y.sum().backward()
+plt.plot(x.detach().numpy(), x.grad.numpy())
+plt.title('The Derivative of the Variational Sigmoid')
+plt.xlabel('$x$')
+plt.ylabel('$f(x)$')
+
+# More functions include softmax, sparsemax, csoftmax, csparsemax, and LML layer
+
+
