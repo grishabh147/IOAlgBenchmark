@@ -1,0 +1,149 @@
+import numpy as np
+import numpy.random as npr
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+import os
+import sys
+import shutil
+
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from matplotlib import cm
+plt.style.use('bmh')
+from matplotlib import rc
+# rc('font',**{'family':'sans-serif','sans-serif':['Helvetica']})
+# rc('text', usetex=True)
+
+import cvxpy as cp
+from cvxpylayers.torch import CvxpyLayer
+
+def to_np(x):
+    return x.detach().numpy()
+
+def inConstraints(x, G, h):
+    return int(np.all(G.dot(x) <= h))
+
+def plotConstraints(G0, h0, G1=None, h1=None, xmin=0, xmax=1, ymin=0, ymax=1):
+    xx, yy = np.meshgrid(np.linspace(xmin, xmax, 600),
+                         np.linspace(ymin, ymax, 600))
+    xxFlat = xx.ravel()
+    yyFlat = yy.ravel()
+    gridX = np.vstack((xxFlat, yyFlat)).T
+
+    fig, ax = plt.subplots(1, 1, figsize=(5,5))
+    ax.axis([xmin, xmax, ymin, ymax])
+
+    zzFlat0 = []
+    zzFlat1 = []
+    _xmin = _xmax = _ymin = _ymax = 0.5
+    for i in range(len(gridX)):
+        xi = gridX[i]
+        t = inConstraints(xi, G0, h0)
+        zzFlat0.append(t)
+        if t:
+            _xmin = min(_xmin, xi[0])
+            _xmax = max(_xmax, xi[0])
+            _ymin = min(_ymin, xi[1])
+            _ymax = max(_ymax, xi[1])
+        if G1 is not None:
+            t = inConstraints(xi, G1, h1)
+            zzFlat1.append(t)
+
+    zz0 = np.array(zzFlat0).reshape(xx.shape)
+    cs = ax.contourf(xx, yy, zz0, cmap=cm.Blues, alpha=0.5)
+    cs.cmap.set_under('white')
+    cs.set_clim(0.5, 1.0)
+
+    if G1 is not None:
+        zz1 = np.array(zzFlat1).reshape(xx.shape)
+        cs = ax.contourf(xx, yy, zz1, cmap=cm.Reds, alpha=0.5)
+        cs.cmap.set_under('white')
+        cs.set_clim(0.5, 1.0)
+
+    scale = 0.1
+    _xmin, _ymin = [z-scale*z for z in [_xmin, _ymin]]
+    _xmax, _ymax = [z+scale*z for z in [_xmax, _ymax]]
+    ax.axis([_xmin, _xmax, _ymin, _ymax])
+    ax.axes.get_xaxis().set_visible(False)
+    ax.axes.get_yaxis().set_visible(False)
+
+    return fig, ax
+
+
+# Polytop projections 
+nx, ncon = 2, 10
+
+_G = cp.Parameter((ncon, nx))
+_h = cp.Parameter(ncon)
+_x = cp.Parameter(nx)
+_y = cp.Variable(nx)
+obj = cp.Minimize(0.5*cp.sum_squares(_x-_y))
+cons = [_G*_y <= _h]
+prob = cp.Problem(obj, cons)
+
+layer = CvxpyLayer(prob, parameters=[_G, _h, _x], variables=[_y])
+
+# initialize random polytope
+torch.manual_seed(6)
+G = torch.FloatTensor(ncon, nx).uniform_(-4, 4)
+z0 = torch.full([nx], 0.5)
+s0 = torch.full([ncon], 0.5)
+h = G.mv(z0)+s0
+plotConstraints(to_np(G), to_np(h))
+
+# project point onto it
+torch.manual_seed(0)
+x = torch.randn(nx)
+y, = layer(G, h, x)
+print(f'Input: {to_np(x)}\nOutput: {to_np(y)}')
+
+#initialize learning polytope 
+torch.manual_seed(22)
+G_hat = nn.Parameter(torch.FloatTensor(ncon, nx).uniform_(-4, 4).requires_grad_())
+h_hat = G_hat.mv(z0)+s0
+plotConstraints(to_np(G), to_np(h), to_np(G_hat), to_np(h_hat))
+
+
+#learning
+opt = torch.optim.Adam([G_hat], lr=1e-2)
+losses = []
+
+d = 'polytope_images'
+if os.path.exists(d):
+    shutil.rmtree(d)
+os.makedirs(d)
+
+for i in range(2500):
+    x = torch.randn(nx)
+    y, = layer(G, h, x)
+    
+    h_hat = G_hat.mv(z0)+s0
+    yhat, = layer(G_hat, h_hat, x)
+    loss = (yhat-y).norm()
+    losses.append(loss)
+    
+    if i % 50 == 0:
+        fig, ax = plotConstraints(to_np(G), to_np(h), to_np(G_hat), to_np(h_hat))
+        fig.tight_layout()
+        fig.savefig(f'{d}/{i:04d}.png')
+        plt.close(fig)
+        
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+ 
+fig, ax = plt.subplots(1, 1, figsize=(6,4))
+N = 100
+xs = np.arange(N-1, len(losses))
+ys = np.convolve(losses, np.full(N, 1./N), mode='valid')
+ax.plot(xs, ys)
+ax.set_xlabel('Iteration')
+ax.set_ylabel('Rolling Loss')
+ax.set_ylim(0, None)
+
+os.system(f'convert -delay 10 -loop 0 {d}/????.png {d}/animation.gif');
+
+#Ellipsoid Projections
